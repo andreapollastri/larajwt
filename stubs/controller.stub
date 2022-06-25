@@ -1,0 +1,364 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use Exception;
+use Firebase\JWT\JWT;
+use Illuminate\Http\Request;
+use Andr3a\Larajwt\Models\Token;
+use Firebase\JWT\ExpiredException;
+use App\Http\Controllers\Controller;
+use Illuminate\Support\Facades\Auth;
+
+class JwtController extends Controller
+{
+    /**
+     * @OA\Post(
+     *     path="/api/auth",
+     *     summary="Login Endpoint",
+     *     tags={"Auth"},
+     *     description="Get JWT Tokens to login the User.",
+     *     @OA\Parameter(
+     *         name="Accept",
+     *         description="API Accept Parameter (set it to 'application/json').",
+     *         required=false,
+     *         in="header",
+     *         @OA\Schema(type="string"),
+     *     ),
+     *     @OA\Parameter(
+     *         name="Content-Type",
+     *         description="API Content-Type Parameter (set it to 'application/json').",
+     *         required=false,
+     *         in="header",
+     *         @OA\Schema(type="string"),
+     *     ),
+     *     @OA\RequestBody(
+     *         required=true,
+     *         @OA\MediaType(
+     *             mediaType="multipart/form-data",
+     *             @OA\Schema(
+     *                 @OA\Property(
+     *                      property="username",
+     *                      type="string",
+     *                      description="User username.",
+     *                 ),
+     *                 @OA\Property(
+     *                      property="password",
+     *                      type="string",
+     *                      description="User password.",
+     *                 ),
+     *                 required={"username","password"}
+     *             )
+     *         )
+     *     ),
+     *     @OA\Response(
+     *          response=200,
+     *          description="Successful User login.",
+     *          @OA\JsonContent(
+     *              @OA\Property(
+     *                  property="access_token",
+     *                  type="string",
+     *                  description="The JWT Access Token for the User.",
+     *                  example="AccessToken123"
+     *              ),
+     *              @OA\Property(
+     *                  property="refresh_token",
+     *                  type="string",
+     *                  description="The JWT Refresh Token for the User.",
+     *                  example="RefreshToken123"
+     *              ),
+     *              @OA\Property(
+     *                  property="expires_in",
+     *                  type="integer",
+     *                  description="The number of seconds the access token is valid.",
+     *                  example="3600"
+     *              ),
+     *              @OA\Property(
+     *                  property="token_type",
+     *                  type="string",
+     *                  description="Will always be bearer.",
+     *                  example="Bearer"
+     *              )
+     *          )
+     *      ),
+     *      @OA\Response(
+     *          response=422,
+     *          description="Payload validation error."
+     *      ),
+     *      @OA\Response(
+     *          response=401,
+     *          description="Unauthorized."
+     *      )
+     * )
+    */
+    public function login(Request $request)
+    {
+        if (! $request->username || ! $request->password) {
+            return response()->json([
+                'message' => 'Missing parameters.',
+                'errors' => 'Missing username and/or password parameters.',
+            ], 422);
+        }
+
+        Auth::attempt([
+            'email' => $request->username,
+            'password' => $request->password,
+        ]);
+
+        if (! Auth::check()) {
+            return response()->json([
+                'message' => 'Given credentials are invalid.',
+                'errors' => 'Username and password don\'t match.',
+            ], 401);
+        }
+
+        $session = Token::create([
+            'ip_address' => $request->ip(),
+            'user_agent' => $request->header('User-Agent'),
+            'user_id' => Auth::user()->id,
+            'last_activity' => time(),
+            'payload' => JWT::encode([
+                'iat' => time(),
+                'exp' => time() + config('larajwt.jwt_refresh_ttl'),
+            ], config('larajwt.jwt_refresh_secret')),
+        ]);
+
+        return response()->json([
+            'access_token' => JWT::encode([
+                'user_id' => Auth::user()->id,
+                'token_id' => $session->id,
+                'iat' => time(),
+                'exp' => time() + config('larajwt.jwt_access_ttl'),
+            ], config('larajwt.jwt_access_secret')),
+            'refresh_token' => $session->payload,
+            'expires_in' => config('larajwt.jwt_access_ttl'),
+            'token_type' => 'bearer',
+        ]);
+    }
+
+    /**
+     * @OA\Get(
+     *     path="/api/auth",
+     *     summary="Me Endpoint",
+     *     tags={"Auth"},
+     *     description="Get Authentication Status and User Data Information.",
+     *     @OA\Parameter(
+     *         name="Accept",
+     *         description="API Accept Parameter (set it to 'application/json').",
+     *         required=false,
+     *         in="header",
+     *         @OA\Schema(type="string"),
+     *     ),
+     *     @OA\Parameter(
+     *         name="Content-Type",
+     *         description="API Content-Type Parameter (set it to 'application/json').",
+     *         required=false,
+     *         in="header",
+     *         @OA\Schema(type="string"),
+     *     ),
+     *     @OA\Parameter(
+     *         name="Authorization",
+     *         description="Authorization Bearer Token.",
+     *         required=true,
+     *         in="header",
+     *         @OA\Schema(type="string"),
+     *     ),
+     *     @OA\Response(
+     *          response=200,
+     *          description="Successful request with User information.",
+     *          @OA\JsonContent(
+     *            type="array",
+     *              @OA\Items()
+     *          )
+     *      ),
+     *      @OA\Response(
+     *          response=422,
+     *          description="Payload validation error."
+     *      ),
+     *      @OA\Response(
+     *          response=401,
+     *          description="Unauthorized."
+     *      )
+     * )
+    */
+    public function me(Request $request)
+    {
+        return $request->user;
+    }
+
+    /**
+     * @OA\Patch(
+     *     path="/api/auth",
+     *     summary="Refresh Endpoint",
+     *     tags={"Auth"},
+     *     description="Get refreshed JWT Tokens to renew User session.",
+     *     @OA\Parameter(
+     *         name="Accept",
+     *         description="API Accept Parameter (set it to 'application/json').",
+     *         required=false,
+     *         in="header",
+     *         @OA\Schema(type="string"),
+     *     ),
+     *     @OA\Parameter(
+     *         name="Content-Type",
+     *         description="API Content-Type Parameter (set it to 'application/json').",
+     *         required=false,
+     *         in="header",
+     *         @OA\Schema(type="string"),
+     *     ),
+     *     @OA\RequestBody(
+     *         required=true,
+     *         @OA\MediaType(
+     *             mediaType="multipart/form-data",
+     *             @OA\Schema(
+     *                 @OA\Property(
+     *                      property="refresh_token",
+     *                      type="string",
+     *                      description="JWT Refresh Token.",
+     *                 ),
+     *                 required={"refresh_token"}
+     *             )
+     *         )
+     *     ),
+     *     @OA\Response(
+     *          response=200,
+     *          description="Successful tokens refresh.",
+     *          @OA\JsonContent(
+     *              @OA\Property(
+     *                  property="access_token",
+     *                  type="string",
+     *                  description="The JWT Access Token for the User.",
+     *                  example="AccessToken123"
+     *              ),
+     *              @OA\Property(
+     *                  property="refresh_token",
+     *                  type="string",
+     *                  description="The JWT Refresh Token for the User.",
+     *                  example="RefreshToken123"
+     *              ),
+     *              @OA\Property(
+     *                  property="expires_in",
+     *                  type="integer",
+     *                  description="The number of seconds the access token is valid.",
+     *                  example="3600"
+     *              ),
+     *              @OA\Property(
+     *                  property="token_type",
+     *                  type="string",
+     *                  description="Will always be bearer.",
+     *                  example="Bearer"
+     *              )
+     *          )
+     *      ),
+     *      @OA\Response(
+     *          response=422,
+     *          description="Payload validation error."
+     *      ),
+     *      @OA\Response(
+     *          response=401,
+     *          description="Unauthorized."
+     *      )
+     * )
+    */
+    public function refresh(Request $request)
+    {
+        if (! $request->refresh_token) {
+            return response()->json([
+                'message' => 'Missing parameters.',
+                'errors' => 'Missing refresh_token parameter.',
+            ], 422);
+        }
+
+        $session = Token::where('payload', $request->refresh_token)->first();
+
+        if ($session) {
+            try {
+                JWT::decode($session->payload, config('larajwt.jwt_refresh_secret'), ['HS256']);
+            } catch (ExpiredException $e) {
+                return response()->json([
+                    'message' => 'Given token is expired.',
+                    'errors' => 'Expired token.',
+                ], 401);
+            } catch (Exception $e) {
+                return response()->json([
+                    'message' => 'Given token is invalid.',
+                    'errors' => 'Invalid token.',
+                ], 401);
+            }
+
+            $session->payload = JWT::encode([
+                'iat' => time(),
+                'exp' => time() + config('larajwt.jwt_refresh_ttl'),
+            ], config('larajwt.jwt_refresh_secret'));
+            $session->last_activity = time();
+            $session->save();
+
+            return response()->json([
+                'access_token' => JWT::encode([
+                    'user_id' => $session->user_id,
+                    'token_id' => $session->id,
+                    'iat' => time(),
+                    'exp' => time() + config('larajwt.jwt_access_ttl'),
+                ], config('larajwt.jwt_access_secret')),
+                'refresh_token' => $session->payload,
+                'expires_in' => config('larajwt.jwt_access_ttl'),
+                'token_type' => 'bearer',
+            ]);
+        } else {
+            return response()->json([
+                'message' => 'Given token is invalid.',
+                'errors' => 'Invalid token.',
+            ], 401);
+        }
+    }
+
+    /**
+     * @OA\Delete(
+     *     path="/api/auth",
+     *     summary="Logout Endpoint",
+     *     tags={"Auth"},
+     *     description="Revoke User Session to logout the User.",
+     *     @OA\Parameter(
+     *         name="Accept",
+     *         description="API Accept Parameter (set it to 'application/json').",
+     *         required=false,
+     *         in="header",
+     *         @OA\Schema(type="string"),
+     *     ),
+     *     @OA\Parameter(
+     *         name="Content-Type",
+     *         description="API Content-Type Parameter (set it to 'application/json').",
+     *         required=false,
+     *         in="header",
+     *         @OA\Schema(type="string"),
+     *     ),
+     *     @OA\Parameter(
+     *         name="Authorization",
+     *         description="Authorization Bearer Token.",
+     *         required=true,
+     *         in="header",
+     *         @OA\Schema(type="string"),
+     *     ),
+     *     @OA\Response(
+     *          response=200,
+     *          description="Successful Logout Action."
+     *      ),
+     *      @OA\Response(
+     *          response=422,
+     *          description="Payload validation error."
+     *      ),
+     *      @OA\Response(
+     *          response=401,
+     *          description="Unauthorized."
+     *      )
+     * )
+    */
+    public function logout(Request $request)
+    {
+        $session = Token::find($request->jwt->token_id);
+
+        if ($session) {
+            $session->delete();
+        }
+    }
+}
